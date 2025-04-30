@@ -1,20 +1,19 @@
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, request, jsonify, render_template, Response
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 import pandas as pd
 import numpy as np
-import os
-import tempfile
-from uuid import uuid4
-from matminer.featurizers.composition import ElementProperty, Stoichiometry
-from matminer.featurizers.conversions import StrToComposition  # 新增关键依赖
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
 from sklearn.metrics import mean_squared_error
-from werkzeug.exceptions import HTTPException
+from matminer.featurizers.composition import ElementProperty, Stoichiometry
+from matminer.featurizers.conversions import StrToComposition
+import uuid
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 CORS(app)
+user_sessions = {}  # 存储用户会话数据
 
 @app.errorhandler(Exception)
 def handle_error(e):
@@ -25,8 +24,6 @@ def handle_error(e):
         "error": str(e),
         "code": code
     }), code
-
-user_sessions = {}
 
 def clean_data(df, composition_col):
     df_cleaned = df.copy()
@@ -49,22 +46,9 @@ def clean_data(df, composition_col):
     df_cleaned = df_cleaned.dropna(how='any')
     return df_cleaned
 
-def process_upload(file_path, ext):
-    try:
-        if ext == 'csv':
-            df = pd.read_csv(file_path)
-        elif ext in {'xls', 'xlsx'}:
-            df = pd.read_excel(file_path)
-        else:
-            raise ValueError("Unsupported file format")
-        return df
-    except Exception as e:
-        raise ValueError(f"文件读取失败: {e}")
-
 def transform_features_core(df, composition_col):
     transformation_status = {}
     
-    # 新增: 字符串到composition对象转换
     try:
         df = StrToComposition().featurize_dataframe(df, composition_col, ignore_errors=True)
         if 'composition' not in df.columns:
@@ -77,7 +61,7 @@ def transform_features_core(df, composition_col):
 
     try:
         ep_featurizer = ElementProperty.from_preset("magpie")
-        df_ep = ep_featurizer.featurize_dataframe(df, 'composition', ignore_errors=True)  # 修改列名
+        df_ep = ep_featurizer.featurize_dataframe(df, 'composition', ignore_errors=True)
         ep_features = [col for col in ep_featurizer.feature_labels() if col in df_ep.columns]
         transformation_status["ElementProperty"] = f"完成（生成{len(ep_features)}个特征）" if ep_features else "失败（无有效特征）"
     except Exception as e:
@@ -85,7 +69,7 @@ def transform_features_core(df, composition_col):
 
     try:
         st_featurizer = Stoichiometry()
-        df_st = st_featurizer.featurize_dataframe(df, 'composition', ignore_errors=True)  # 修改列名
+        df_st = st_featurizer.featurize_dataframe(df, 'composition', ignore_errors=True)
         st_features = [col for col in st_featurizer.feature_labels() if col in df_st.columns]
         transformation_status["Stoichiometry"] = f"完成（生成{len(st_features)}个特征）" if st_features else "失败（无有效特征）"
     except Exception as e:
@@ -106,32 +90,31 @@ def transform_features_core(df, composition_col):
     
     return numerical_df, transformation_status, len(numerical_df.columns), ep_features, st_features, df_processed
 
+@app.route('/')
+def index():
+    return render_template('client.html')
+
 @app.route('/upload', methods=['POST'])
-def handle_upload():
+def upload_file():
     try:
         file = request.files['file']
         if not file:
-            return jsonify({"error": "No file uploaded"}), 400
-            
-        ext = file.filename.split('.')[-1].lower()
-        _, temp_path = tempfile.mkstemp(suffix=f".{ext}")
-        file.save(temp_path)
-
-        df = process_upload(temp_path, ext)
-        os.remove(temp_path)
-
-        user_id = str(uuid4())
+            return jsonify({"error": "未上传文件"}), 400
+        
+        user_id = str(uuid.uuid4())
+        df = pd.read_excel(file) if file.filename.endswith(('.xls', '.xlsx')) else pd.read_csv(file)
         user_sessions[user_id] = {
-            'raw': df.to_dict(orient='list'),
-            'transformed': None,
-            'cleaned_transformed': None
+            "raw": df.to_dict(orient='list'),
+            "columns": list(df.columns),
+            "data_types": {col: str(dtype) for col, dtype in df.dtypes.items()},
+            "preview": df.head(5).replace({np.nan: None}).to_dict(orient='list')
         }
-
+        
         return jsonify({
             "user_id": user_id,
             "columns": list(df.columns),
-            "preview": {k: v[:5] for k, v in user_sessions[user_id]['raw'].items()},
-            "data_types": {col: str(df[col].dtype) for col in df.columns}
+            "data_types": {col: str(dtype) for col, dtype in df.dtypes.items()},
+            "preview": df.head(5).replace({np.nan: None}).to_dict(orient='list')
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -157,7 +140,6 @@ def transform_features():
 
         df_processed, status, valid_feature_count, ep_features, st_features, full_df_processed = transform_features_core(df_cleaned, composition_col)
 
-        # 关键修改：移除composition列以避免JSON序列化失败
         transformed_preview = full_df_processed.drop(columns=['composition'], errors='ignore').head(5).replace({np.nan: None}).to_dict(orient='list')
         original_columns = list(df_processed.select_dtypes(include=[np.number]).drop(columns=['composition'], errors='ignore').columns)
         generated_features = ep_features + st_features
@@ -244,9 +226,29 @@ def start_training():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route('/')
-def index():
-    return render_template('client.html')
+# 新增：下载特征表格接口
+@app.route('/download_features', methods=['POST'])
+def download_features():
+    try:
+        req_data = request.get_json()
+        user_id = req_data.get('user_id')
+        if not user_id or user_id not in user_sessions:
+            return jsonify({"error": "无效的用户会话，请重新上传数据"}), 400
+        
+        user_session = user_sessions[user_id]
+        if not user_session.get('transformed'):
+            return jsonify({"error": "请先完成特征转化"}), 400
+        
+        df = pd.DataFrame(user_session['transformed'])
+        csv_data = df.to_csv(index=False)
+        
+        return Response(
+            csv_data,
+            mimetype="text/csv",
+            headers={"Content-disposition": "attachment; filename=features.csv"}
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8002)
