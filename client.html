@@ -187,6 +187,30 @@
         </div>
 
         <div class="container" id="resultSection">
+            <div id="featureImportance" style="display: none; margin-bottom: 30px;">
+                <h3>特征重要性分析</h3>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 2; min-width: 400px; height: 300px;">
+                        <canvas id="featureImportanceChart"></canvas>
+                    </div>
+                    <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px;">
+                        <div class="info-panel">
+                            <button class="toggle-btn" onclick="toggleExplanation()" style="background: none; border: none; cursor: pointer; color: #3498db;">
+                                ℹ️ 点击查看特征重要性说明
+                            </button>
+                            <div id="importanceExplanation" style="display: none; margin-top: 10px;">
+                                <p style="font-weight: bold; color: #2c3e50;">特征重要性指标说明：</p>
+                                <ul style="list-style-type: square; padding-left: 20px;">
+                                    <li>线性模型：系数绝对值大小</li>
+                                    <li>树模型：基尼不纯度减少量</li>
+                                    <li>正值表示正向影响，负值表示负向影响</li>
+                                    <li>绝对值越大表示对预测影响越大</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div id="chartSettings">
                 <h3>图表样式设置</h3>
                 <div>
@@ -477,6 +501,78 @@
             }
         }
 
+        let featureImportanceChart = null;
+
+        function toggleExplanation() {
+            const panel = document.getElementById('importanceExplanation');
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function createFeatureImportanceChart(featureData) {
+            // 特征排序并取前5项
+            const sortedFeatures = Object.entries(featureData)
+                .sort(([,a], [,b]) => Math.abs(b) - Math.abs(a))
+                .slice(0, 5);
+
+            const ctx = document.getElementById('featureImportanceChart');
+            const labels = sortedFeatures.map(([name]) => name);
+            const values = sortedFeatures.map(([,value]) => value);
+
+            if (featureImportanceChart) {
+                featureImportanceChart.destroy();
+            }
+
+            featureImportanceChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '特征重要性',
+                        data: values,
+                        backgroundColor: '#3498db',
+                        borderColor: '#2980b9',
+                        borderWidth: 1,
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => `${ctx.raw.toFixed(4)} 重要性值`
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: { 
+                                display: true, 
+                                text: '重要性分数',
+                                font: { weight: 'bold' }
+                            },
+                            grid: { color: '#ecf0f1' }
+                        },
+                        y: {
+                            ticks: { 
+                                autoSkip: false,
+                                font: { size: 12 }
+                            },
+                            title: { 
+                                display: true, 
+                                text: '特征名称',
+                                font: { weight: 'bold' }
+                            },
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
+        }
+
         async function startTraining() {
             const compositionCol = document.getElementById('compositionSelect').value;
             const targetCol = document.getElementById('targetSelect').value;
@@ -546,7 +642,7 @@
                     ]
                 };
                 const stats = result.sample_stats;
-                document.getElementById('metrics').innerHTML = `
+                const metricsHtml = `
                     <p>样本统计：</p>
                     <ul>
                         <li>初始样本：${stats.initial}</li>
@@ -559,8 +655,12 @@
                     <p>生成特征数量：${result.feature_count}</p>
                     <p>RMSE 训练集：${result.rmse_train.toFixed(4)}</p>
                     <p>RMSE 测试集：${result.rmse_test.toFixed(4)}</p>
-                    <button onclick="downloadPredictions()">下载预测结果</button>
                 `;
+                document.getElementById('metrics').innerHTML = metricsHtml;
+                if (result.feature_importance) {
+                    createFeatureImportanceChart(result.feature_importance);
+                    document.getElementById('featureImportance').style.display = 'block';
+                }
 
                 // 销毁旧图表
                 if (chart) chart.destroy();

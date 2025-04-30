@@ -204,6 +204,30 @@ def start_training():
         rmse_train = np.sqrt(mean_squared_error(y_train, y_pred_train))
         rmse_test = np.sqrt(mean_squared_error(y_test, y_pred_test))
 
+        # 特征重要性计算
+        feature_importance = {}
+        if hasattr(model, 'coef_'):
+            importance = model.coef_
+        elif hasattr(model, 'feature_importances_'):
+            importance = model.feature_importances_
+        else:
+            importance = np.zeros(X_train.shape[1])
+        
+        sorted_idx = np.argsort(importance)[::-1]
+        for idx in sorted_idx:
+            feature_name = X_train.columns[idx]
+            feature_importance[feature_name] = float(importance[idx])
+
+        user_session['model'] = {
+            'type': req_data['model'],
+            'object': model,
+            'metrics': {
+                'rmse_train': float(rmse_train),
+                'rmse_test': float(rmse_test)
+            },
+            'feature_importance': feature_importance
+        }
+
         return jsonify({
             "rmse_train": rmse_train,
             "rmse_test": rmse_test,
@@ -221,7 +245,8 @@ def start_training():
                 "train_set": len(y_train)
             },
             "feature_count": X.shape[1],
-            "feature_status": "所有特征值已成功生成"
+            "feature_status": "所有特征值已成功生成",
+            "feature_importance": feature_importance
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
